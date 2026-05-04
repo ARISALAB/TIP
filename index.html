@@ -90,7 +90,7 @@
         .section.active { display: block; animation: fadeIn 0.2s ease-in; }
         @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
         @keyframes pulse { 0%,100%{opacity:0.3;transform:scale(0.8)} 50%{opacity:1;transform:scale(1.1)} }
-        .entry-row-grid { display: grid; grid-template-columns: 2fr 0.7fr 1fr 1fr; gap: 10px; align-items: center; padding: 10px 0; border-bottom: 1px solid #f1f5f9; }
+        .entry-row-grid { display: grid; grid-template-columns: 2fr 0.7fr 0.7fr 1fr 1fr; gap: 10px; align-items: center; padding: 10px 0; border-bottom: 1px solid #f1f5f9; }
         
         .chart-container { position: relative; height: 350px; width: 100%; }
         .grid-charts { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-top: 1rem; }
@@ -217,6 +217,12 @@
                     <span style="font-size: 0.6rem; opacity: 0.7;">v23.9 ACTIVE</span>
                 </div>
                 <div id="aiInsightsContent"></div>
+            </div>
+
+            <!-- Ανάλυση ανά Ώρα -->
+            <div class="card" id="hoursAnalysisBox" style="display:none;border-left:4px solid #f59e0b;">
+                <div class="card-title"><i data-lucide="clock" style="color:#f59e0b"></i> Ανάλυση Tips ανά Ώρα Εργασίας</div>
+                <div id="hoursAnalysisContent"></div>
             </div>
 
             <div class="stats-grid">
@@ -509,12 +515,21 @@
                 <div class="grid-3">
                     <div><label>Ημερομηνία</label><input type="date" id="workDate" onchange="checkExistingEntry()"></div>
                     <div><label>Τζίρος (€)</label><input type="number" id="shopTurnover" step="0.01"></div>
+                    <div>
+                        <label>Τρόπος Κατανομής</label>
+                        <select id="distMode" style="font-weight:700;" onchange="updateDistModeHint()">
+                            <option value="points">📊 Μόνο Points (αγνοεί ώρες)</option>
+                            <option value="hours">⏱️ Points × Ώρες (€/ώρα ανά μονάδα)</option>
+                        </select>
+                        <div id="distModeHint" style="font-size:0.72rem;color:#6366f1;margin-top:4px;font-weight:600;">Κατανομή βάσει συντελεστών (1.0, 1.25 κτλ)</div>
+                    </div>
                 </div>
                 <hr style="margin:1.5rem 0; border:0; border-top:1px solid var(--border);">
                 <!-- Column headers -->
-                <div style="display:grid;grid-template-columns:2fr 0.7fr 1fr 1fr;gap:10px;padding:0 0 6px;border-bottom:2px solid var(--border);margin-bottom:4px;">
+                <div style="display:grid;grid-template-columns:2fr 0.7fr 0.7fr 1fr 1fr;gap:10px;padding:0 0 6px;border-bottom:2px solid var(--border);margin-bottom:4px;">
                     <span style="font-size:0.72rem;font-weight:700;color:var(--text-muted);text-transform:uppercase;">Άτομο</span>
                     <span style="font-size:0.72rem;font-weight:700;color:#8b5cf6;text-transform:uppercase;text-align:center;">Points</span>
+                    <span style="font-size:0.72rem;font-weight:700;color:#f59e0b;text-transform:uppercase;text-align:center;">Ώρες</span>
                     <span style="font-size:0.72rem;font-weight:700;color:#10b981;text-transform:uppercase;text-align:center;">Cash €</span>
                     <span style="font-size:0.72rem;font-weight:700;color:#3b82f6;text-transform:uppercase;text-align:center;">Card €</span>
                 </div>
@@ -801,6 +816,44 @@
     const fmt = (num) => new Number(num).toLocaleString('el-GR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
     const save = () => { localStorage.setItem('staff_v14', JSON.stringify(staff)); localStorage.setItem('history_v14', JSON.stringify(history)); };
 
+    // ── Helper: επαναϋπολογισμός outCash/outCard βάσει distMode ─────
+    // Χρησιμοποιείται παντού ώστε αλλαγή mode να αντανακλάται αυτόματα
+    // ── Υπολογισμός μεριδίου ─────────────────────────────────────────────────
+    // Λογική: €/ώρα = TotalTips / Σ(points_i × hours_i)
+    //         Κάθε άτομο παίρνει: €/ώρα × points_i × hours_i
+    //
+    //   points:        μερίδιο = points (αγνοεί ώρες)
+    //   hours:         μερίδιο = points × hours  ← ΣΩΣΤΗ ΛΟΓΙΚΗ
+    //   points_hours:  ίδιο με hours (το points ήδη περιλαμβάνεται)
+    function getShare(d, mode) {
+        const pts = parseFloat(d.points) || 1;
+        const hrs = parseFloat(d.hours)  || 0;
+        if (mode === 'hours' || mode === 'points_hours') return pts * hrs;
+        return pts; // points only
+    }
+
+    // Πάντα επαναϋπολογίζει βάσει αποθηκευμένου distMode
+    function calcOut(h, d, type) {
+        const mode = h.distMode || 'points';
+
+        // Για mode=points χρησιμοποιούμε το αποθηκευμένο (γρήγορο)
+        if (mode === 'points') {
+            return parseFloat(type === 'cash' ? d.outCash : d.outCard) || 0;
+        }
+
+        // Για hours/points_hours: €/μοναδο-ώρα × μονάδες × ώρες
+        const totalIn  = h.details.reduce((a, det) =>
+            a + (parseFloat(type === 'cash' ? det.inCash : det.inCard) || 0), 0);
+        const totalShr = h.details.reduce((a, det) => a + getShare(det, mode), 0);
+
+        if (totalShr <= 0) {
+            // Fallback: αν κανείς δεν έχει ώρες → ίση κατανομή με points
+            const totalPts = h.details.reduce((a, det) => a + (parseFloat(det.points)||1), 0);
+            return totalPts > 0 ? (parseFloat(d.points)||1) / totalPts * totalIn : 0;
+        }
+        return (getShare(d, mode) / totalShr) * totalIn;
+    }
+
     function showSection(id, el) {
         document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
         document.querySelectorAll('.nav-link').forEach(n => n.classList.remove('active'));
@@ -893,7 +946,7 @@
         data.forEach(h => {
             let dCash=0,dCard=0;
             h.details.forEach(d=>{
-                const c=parseFloat(d.outCash||0),k=parseFloat(d.outCard||0);
+                const c=calcOut(h,d,'cash'),k=calcOut(h,d,'card');
                 dCash+=c;dCard+=k;
                 if(!staffMap[d.name]) staffMap[d.name]={cash:0,card:0,days:0,vals:[]};
                 staffMap[d.name].cash+=c;staffMap[d.name].card+=k;
@@ -1098,8 +1151,8 @@
         sorted.forEach(h => {
             let dCash=0, dCard=0;
             h.details.forEach(d => {
-                const c = parseFloat(d.outCash)||0;
-                const k = parseFloat(d.outCard)||0;
+                const c = calcOut(h,d,'cash');
+                const k = calcOut(h,d,'card');
                 dCash+=c; dCard+=k;
                 if(!staffMap[d.name]) staffMap[d.name]={cash:0,card:0,days:0};
                 staffMap[d.name].cash+=c;
@@ -1157,7 +1210,7 @@
         const staffConsistency = staff.map(s => {
             const vals = sorted.map(h => {
                 const d = h.details.find(x=>x.name===s.name);
-                return d ? parseFloat(d.outCash)+parseFloat(d.outCard) : null;
+                return d ? calcOut(h,d,'cash')+calcOut(h,d,'card') : null;
             }).filter(x=>x!==null);
             if(vals.length<2) return {name:s.name,cv:null};
             const mean = vals.reduce((a,b)=>a+b,0)/vals.length;
@@ -1401,6 +1454,127 @@
         </div>`;
     }
 
+    // ── Ανάλυση Tips ανά Ώρα Εργασίας ──────────────────────────────────────
+    function renderHoursAnalysis(filtered) {
+        const box = document.getElementById('hoursAnalysisBox');
+        const content = document.getElementById('hoursAnalysisContent');
+        if (!box || !content) return;
+
+        // Συγκέντρωση δεδομένων ανά άτομο
+        const staffHours = {}; // name → { totalHours, totalTips, totalCash, totalCard, days }
+        let hasHoursData = false;
+
+        filtered.forEach(h => {
+            h.details.forEach(d => {
+                const hours = parseFloat(d.hours || 0);
+                const tips  = calcOut(h,d,'cash') + calcOut(h,d,'card');
+                const cash  = calcOut(h,d,'cash');
+                const card  = calcOut(h,d,'card');
+                if (!staffHours[d.name]) staffHours[d.name] = {totalHours:0, totalTips:0, totalCash:0, totalCard:0, days:0, daysWithHours:0};
+                staffHours[d.name].totalTips  += tips;
+                staffHours[d.name].totalCash  += cash;
+                staffHours[d.name].totalCard  += card;
+                staffHours[d.name].days++;
+                if (hours > 0) {
+                    staffHours[d.name].totalHours   += hours;
+                    staffHours[d.name].daysWithHours++;
+                    hasHoursData = true;
+                }
+            });
+        });
+
+        if (!hasHoursData) { box.style.display = 'none'; return; }
+        box.style.display = 'block';
+
+        const entries = Object.entries(staffHours)
+            .filter(([,v]) => v.totalHours > 0)
+            .map(([name,v]) => ({
+                name,
+                totalHours:   v.totalHours,
+                avgHoursDay:  v.daysWithHours > 0 ? v.totalHours / v.daysWithHours : 0,
+                totalTips:    v.totalTips,
+                totalCash:    v.totalCash,
+                totalCard:    v.totalCard,
+                tipsPerHour:  v.totalHours > 0 ? v.totalTips / v.totalHours : 0,
+                cashPerHour:  v.totalHours > 0 ? v.totalCash / v.totalHours : 0,
+                cardPerHour:  v.totalHours > 0 ? v.totalCard / v.totalHours : 0,
+                days:         v.days,
+                daysWithHours:v.daysWithHours
+            }))
+            .sort((a,b) => b.tipsPerHour - a.tipsPerHour);
+
+        if (!entries.length) { box.style.display = 'none'; return; }
+
+        const maxTPH = entries[0].tipsPerHour;
+        const totalHoursAll = entries.reduce((a,e)=>a+e.totalHours,0);
+        const totalTipsAll  = entries.reduce((a,e)=>a+e.totalTips,0);
+        const avgTPH = totalHoursAll > 0 ? totalTipsAll / totalHoursAll : 0;
+
+        let html = `
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin-bottom:14px;">
+            <div style="background:#fffbeb;border-radius:8px;padding:10px 14px;border-left:3px solid #f59e0b;">
+                <div style="font-size:0.68rem;font-weight:700;color:#b45309;text-transform:uppercase;">Συν. Ώρες</div>
+                <div style="font-size:1.1rem;font-weight:800;color:#1e293b;">${totalHoursAll.toFixed(1)}h</div>
+            </div>
+            <div style="background:#fffbeb;border-radius:8px;padding:10px 14px;border-left:3px solid #f59e0b;">
+                <div style="font-size:0.68rem;font-weight:700;color:#b45309;text-transform:uppercase;">Μ.Ο. Tips/Ώρα</div>
+                <div style="font-size:1.1rem;font-weight:800;color:#1e293b;">${fmt(avgTPH)}€</div>
+            </div>
+            <div style="background:#fffbeb;border-radius:8px;padding:10px 14px;border-left:3px solid #f59e0b;">
+                <div style="font-size:0.68rem;font-weight:700;color:#b45309;text-transform:uppercase;">Καλύτερος €/h</div>
+                <div style="font-size:1.1rem;font-weight:800;color:#1e293b;">${entries[0]?.name}</div>
+                <div style="font-size:0.75rem;color:#b45309;">${fmt(entries[0]?.tipsPerHour)}€/h</div>
+            </div>
+        </div>
+        <div style="overflow-x:auto;">
+        <table style="width:100%;border-collapse:collapse;font-size:0.83rem;">
+            <thead><tr>
+                <th style="background:#1e293b;color:white;padding:8px 12px;text-align:left;">Άτομο</th>
+                <th style="background:#1e293b;color:#fde68a;padding:8px 8px;text-align:center;">Συν. Ώρες</th>
+                <th style="background:#1e293b;color:#fde68a;padding:8px 8px;text-align:center;">Μ.Ο./Μέρα</th>
+                <th style="background:#1e293b;color:#6ee7b7;padding:8px 8px;text-align:center;">Cash/h</th>
+                <th style="background:#1e293b;color:#93c5fd;padding:8px 8px;text-align:center;">Card/h</th>
+                <th style="background:#4f46e5;color:white;padding:8px 8px;text-align:center;">Tips/Ώρα</th>
+                <th style="background:#1e293b;color:white;padding:8px 8px;text-align:center;">Σύνολο Tips</th>
+                <th style="background:#1e293b;color:#94a3b8;padding:8px 8px;text-align:center;">Απόδοση</th>
+            </tr></thead>
+            <tbody>`;
+
+        entries.forEach((e, i) => {
+            const pct = maxTPH > 0 ? (e.tipsPerHour / maxTPH * 100) : 0;
+            const aboveAvg = e.tipsPerHour >= avgTPH;
+            const medal = i===0?'🥇':i===1?'🥈':i===2?'🥉':'';
+            html += `<tr style="background:${i%2===0?'white':'#f8fafc'};">
+                <td style="padding:8px 12px;font-weight:700;">${medal} ${e.name}</td>
+                <td style="padding:8px;text-align:center;color:#b45309;font-weight:700;">${e.totalHours.toFixed(1)}h</td>
+                <td style="padding:8px;text-align:center;color:#64748b;">${e.avgHoursDay.toFixed(1)}h</td>
+                <td style="padding:8px;text-align:center;color:#166534;background:#f0fdf4;">${fmt(e.cashPerHour)}€</td>
+                <td style="padding:8px;text-align:center;color:#1e40af;background:#eff6ff;">${fmt(e.cardPerHour)}€</td>
+                <td style="padding:8px;text-align:center;font-weight:800;color:#4f46e5;background:#eef2ff;">${fmt(e.tipsPerHour)}€</td>
+                <td style="padding:8px;text-align:center;font-weight:700;">${fmt(e.totalTips)}€</td>
+                <td style="padding:8px 12px;">
+                    <div style="height:8px;background:#e2e8f0;border-radius:4px;overflow:hidden;margin-bottom:3px;">
+                        <div style="height:100%;width:${pct}%;background:${aboveAvg?'#4f46e5':'#94a3b8'};border-radius:4px;"></div>
+                    </div>
+                    <div style="font-size:0.7rem;color:${aboveAvg?'#4f46e5':'#94a3b8'};font-weight:600;">${aboveAvg?'▲ Πάνω από μ.ο.':'▼ Κάτω από μ.ο.'}</div>
+                </td>
+            </tr>`;
+        });
+
+        // Footer με συνολικές ώρες αν υπάρχουν και άτομα χωρίς ώρες
+        const noHoursStaff = Object.entries(staffHours).filter(([,v])=>v.totalHours===0);
+        html += `</tbody></table></div>`;
+
+        if (noHoursStaff.length) {
+            html += `<div style="margin-top:10px;font-size:0.78rem;color:#64748b;background:#f8fafc;padding:8px 12px;border-radius:6px;">
+                ℹ️ Χωρίς καταχωρημένες ώρες: <b>${noHoursStaff.map(([n])=>n).join(', ')}</b> — συμπλήρωσε ώρες στη Νέα Εγγραφή για πλήρη ανάλυση.
+            </div>`;
+        }
+
+        content.innerHTML = html;
+        if (typeof lucide !== "undefined") lucide.createIcons();
+    }
+
     // ── Dashboard quick insights (παραμένει για το dashboard box) ──────────────
     function generateAIInsights(filtered, grandCash, grandCard, grandTurnover) {
         if (filtered.length < 3) {
@@ -1421,7 +1595,7 @@
             if(!dayStats[d]) dayStats[d]={tips:0,turnover:0,count:0};
             dayStats[d].tips+=dayTips; dayStats[d].turnover+=h.turnover; dayStats[d].count++;
             h.details.forEach(det=>{
-                const t=parseFloat(det.outCash)+parseFloat(det.outCard);
+                const t=calcOut(h,det,'cash')+calcOut(h,det,'card');
                 if(!staffTotals[det.name]) staffTotals[det.name]={total:0,days:0};
                 staffTotals[det.name].total+=t;
                 if(t>0) staffTotals[det.name].days++;
@@ -1639,8 +1813,8 @@
             dates.forEach(date => {
                 const day = filtered.find(h => h.date === date);
                 const wd = day?.details.find(d => d.name === name);
-                const m = wd ? parseFloat(isPayout ? wd.outCash : wd.inCash) : 0;
-                const k = wd ? parseFloat(isPayout ? wd.outCard : wd.inCard) : 0;
+                const m = wd ? (isPayout ? calcOut(day, wd, 'cash') : parseFloat(wd.inCash)||0) : 0;
+                const k = wd ? (isPayout ? calcOut(day, wd, 'card') : parseFloat(wd.inCard)||0) : 0;
                 if(wd) dCount++; rM += m; rK += k;
                 if(showM) row += `<td class="cell-cash">${m>0?fmt(m):'-'}</td>`;
                 if(showK) row += `<td class="cell-card">${k>0?fmt(k):'-'}</td>`;
@@ -1672,8 +1846,8 @@
             const day = filtered.find(h => h.date === date);
             let dM = 0, dK = 0;
             day?.details.forEach(d => { 
-                dM += parseFloat(isPayout ? d.outCash : d.inCash); 
-                dK += parseFloat(isPayout ? d.outCard : d.inCard); 
+                dM += isPayout ? calcOut(day, d, 'cash') : (parseFloat(d.inCash)||0);
+                dK += isPayout ? calcOut(day, d, 'card') : (parseFloat(d.inCard)||0);
             });
             
             // Υπολογισμοί μόνο για το Payout mode (για τα stats του Dashboard)
@@ -1731,6 +1905,7 @@
             document.getElementById('bestPercentBox').style.display = 'block';
             document.getElementById('bestPercentContent').innerHTML = rd(bestPerc, `(${bestPerc.val.toFixed(2)}%)`);
             generateAIInsights(filtered, grandCash, grandCard, grandTurnover);
+            renderHoursAnalysis(filtered);
         }
         updateCharts(dates, chartCash, chartCard, chartPerc);
         if (typeof lucide !== "undefined") lucide.createIcons();
@@ -1778,6 +1953,18 @@
         save(); renderUI();
     }
 
+    function updateDistModeHint() {
+        const mode = document.getElementById('distMode')?.value;
+        const hint = document.getElementById('distModeHint');
+        if (!hint) return;
+        const msgs = {
+            'points': '📊 Κατανομή μόνο βάσει συντελεστών (1.0, 1.25 κτλ) — αγνοεί ώρες',
+            'hours':  '⏱️ €/ώρα = Tips ÷ Σ(μονάδες×ώρες) — λιγότερες ώρες = λιγότερα €',
+        };
+        hint.textContent = msgs[mode] || '';
+        hint.style.color = mode==='points' ? '#6366f1' : '#f59e0b';
+    }
+
     function checkExistingEntry() {
         const date = document.getElementById('workDate').value;
         const banner = document.getElementById('existingEntryBanner');
@@ -1786,12 +1973,14 @@
 
         const existing = history.find(h => h.date === date);
         if (existing) {
-            const dayTips = existing.details.reduce((a,d)=>a+parseFloat(d.outCash||0)+parseFloat(d.outCard||0),0);
-            const cash    = existing.details.reduce((a,d)=>a+parseFloat(d.outCash||0),0);
-            const card    = existing.details.reduce((a,d)=>a+parseFloat(d.outCard||0),0);
+            const dayTips = existing.details.reduce((a,d)=>a+calcOut(existing,d,'cash')+calcOut(existing,d,'card'),0);
+            const cash    = existing.details.reduce((a,d)=>a+calcOut(existing,d,'cash'),0);
+            const card    = existing.details.reduce((a,d)=>a+calcOut(existing,d,'card'),0);
             const names   = existing.details.map(d=>d.name).join(', ');
             const [y,m,d] = date.split('-');
-            info.innerHTML = `Τζίρος: <b>${fmt(existing.turnover)}€</b> · Tips: <b>${fmt(dayTips)}€</b> (💵 ${fmt(cash)}€ · 💳 ${fmt(card)}€) · Άτομα: <b>${names}</b>`;
+            const modeLabels = {'points':'Points','hours':'Ώρες','points_hours':'Points×Ώρες'};
+            const modeLabel = modeLabels[existing.distMode] || 'Points';
+            info.innerHTML = `Τζίρος: <b>${fmt(existing.turnover)}€</b> · Tips: <b>${fmt(dayTips)}€</b> (💵 ${fmt(cash)}€ · 💳 ${fmt(card)}€) · Κατανομή: <b>${modeLabel}</b> · Άτομα: <b>${names}</b>`;
             banner.style.display = 'block';
         } else {
             banner.style.display = 'none';
@@ -1855,7 +2044,7 @@
         const existing = history.find(h => h.date === date);
         if (existing) {
             const [y,m,d] = date.split('-');
-            const existTips = existing.details.reduce((a,det)=>a+parseFloat(det.outCash||0)+parseFloat(det.outCard||0),0);
+            const existTips = existing.details.reduce((a,det)=>a+calcOut(existing,det,'cash')+calcOut(existing,det,'card'),0);
             const confirmed = confirm(
                 `⚠️ Υπάρχει ήδη εγγραφή για ${d}/${m}/${y}!\n\n` +
                 `Τζίρος: ${fmt(existing.turnover)}€\n` +
@@ -1866,7 +2055,9 @@
             if (!confirmed) return;
         }
 
-        let tCash = 0, tCard = 0, tPts = 0, workers = [];
+        const distMode = document.getElementById('distMode')?.value || 'points';
+
+        let tCash = 0, tCard = 0, workers = [];
         active.forEach(cb => {
             const id = cb.dataset.id;
             const s = staff.find(x => x.id == id);
@@ -1874,9 +2065,24 @@
             const rin = parseFloat(document.querySelector(`.card-in[data-id="${id}"]`).value) || 0;
             const ptsEl = document.querySelector(`.pts-input[data-id="${id}"]`);
             const customPts = ptsEl ? (parseFloat(ptsEl.value) || s.points) : s.points;
-            tCash += cin; tCard += rin; tPts += customPts;
-            workers.push({ name: s.name, points: customPts, defaultPoints: s.points, inCash: cin, inCard: rin });
+            const hrsEl = document.querySelector(`.hrs-input[data-id="${id}"]`);
+            const hours = hrsEl ? (parseFloat(hrsEl.value) || 0) : 0;
+            tCash += cin; tCard += rin;
+            workers.push({ name: s.name, points: customPts, defaultPoints: s.points, hours, inCash: cin, inCard: rin });
         });
+
+        // ── Υπολογισμός μεριδίου ανά worker βάσει mode ────────────────
+        // Χρησιμοποιούμε την global getShare (hours=0 → 0 μερίδιο)
+        let totalShare = workers.reduce((a,w) => a + getShare(w, distMode), 0);
+
+        // Αν mode=hours αλλά κανείς δεν έχει ώρες → fallback σε points
+        const usedMode = (distMode === 'hours' && totalShare <= 0) ? 'points' : distMode;
+        const finalTotal = usedMode === distMode
+            ? totalShare
+            : workers.reduce((a, w) => a + getShare(w, 'points'), 0);
+        if (usedMode !== distMode) {
+            showMiniToast('⚠️ Δεν καταχωρήθηκαν ώρες — κατανομή με Points', '#f59e0b');
+        }
 
         // Διατηρούμε paid status αν υπάρχει ήδη η εγγραφή
         const paidMap = {};
@@ -1884,13 +2090,17 @@
 
         history = history.filter(h => h.date !== date);
         history.push({
-            date, turnover,
-            details: workers.map(w => ({
-                ...w,
-                outCash: (tPts > 0 ? w.points * (tCash / tPts) : 0).toFixed(2),
-                outCard: (tPts > 0 ? w.points * (tCard / tPts) : 0).toFixed(2),
-                paid: paidMap[w.name] || false
-            }))
+            date, turnover, distMode: usedMode,
+            details: workers.map(w => {
+                const share = finalTotal > 0 ? getShare(w, usedMode) / finalTotal : 0;
+                return {
+                    ...w,
+                    share: share.toFixed(4),
+                    outCash: (share * tCash).toFixed(2),
+                    outCard: (share * tCard).toFixed(2),
+                    paid: paidMap[w.name] || false
+                };
+            })
         });
         save(); renderUI(); renderMatrices();
 
@@ -1900,9 +2110,10 @@
 
         // Smart alert
         const dayTips = workers.reduce((a,w) => {
-            return a + (tPts>0 ? w.points*(tCash/tPts) + w.points*(tCard/tPts) : 0);
+            const share = finalTotal > 0 ? getShare(w, usedMode) / finalTotal : 0;
+            return a + share * (tCash + tCard);
         }, 0);
-        const allTips = history.map(h => h.details.reduce((a,d)=>a+parseFloat(d.outCash||0)+parseFloat(d.outCard||0),0));
+        const allTips = history.map(h => h.details.reduce((a,d)=>a+calcOut(h,d,'cash')+calcOut(h,d,'card'),0));
         const avg = allTips.length>1 ? allTips.slice(0,-1).reduce((a,b)=>a+b,0)/(allTips.length-1) : 0;
         const isRecord = allTips.length>1 && dayTips === Math.max(...allTips);
         showSaveToast(dayTips, avg, isRecord);
@@ -1923,6 +2134,7 @@
                     <span style="font-size:0.7rem;color:var(--text-muted);font-weight:400;">(${s.points})</span>
                 </label>
                 <input type="number" class="pts-input" data-id="${s.id}" value="${s.points}" step="0.05" min="0.1" max="3" style="text-align:center;border-color:#c4b5fd;font-weight:700;color:#7c3aed;">
+                <input type="number" class="hrs-input" data-id="${s.id}" placeholder="π.χ. 8" step="0.5" min="0" max="24" style="text-align:center;border-color:#fde68a;font-weight:700;color:#b45309;">
                 <input type="number" class="cash-in" data-id="${s.id}" placeholder="0.00" step="0.01" style="border-color:#a7f3d0;">
                 <input type="number" class="card-in" data-id="${s.id}" placeholder="0.00" step="0.01" style="border-color:#bfdbfe;">
             </div>`;
@@ -1934,7 +2146,7 @@
         // List view για ιστορικό
         if (hList) {
             history.sort((a,b) => new Date(b.date) - new Date(a.date)).forEach(h => {
-                const dayTips = h.details.reduce((a,d)=>a+parseFloat(d.outCash||0)+parseFloat(d.outCard||0),0);
+                const dayTips = h.details.reduce((a,d)=>a+calcOut(h,d,'cash')+calcOut(h,d,'card'),0);
                 hList.innerHTML += `<div style="display:flex;justify-content:space-between;align-items:center;padding:10px 12px;border-bottom:1px solid #eee;">
                     <div>
                         <span style="font-weight:700;">${h.date.split('-').reverse().join('/')}</span>
@@ -1970,6 +2182,9 @@
         setTimeout(() => {
             document.getElementById('workDate').value = h.date;
             document.getElementById('shopTurnover').value = h.turnover;
+            // Επαναφορά distMode
+            const distSel = document.getElementById('distMode');
+            if (distSel && h.distMode) { distSel.value = h.distMode; updateDistModeHint(); }
             document.querySelectorAll('.is-active').forEach(cb => cb.checked = false);
             document.querySelectorAll('.cash-in, .card-in').forEach(input => input.value = '');
 
@@ -1982,6 +2197,8 @@
                     row.querySelector('.card-in').value = detail.inCard;
                     const ptsEl = row.querySelector('.pts-input');
                     if(ptsEl) ptsEl.value = detail.points;
+                    const hrsEl = row.querySelector('.hrs-input');
+                    if(hrsEl && detail.hours) hrsEl.value = detail.hours;
                 }
             });
 
@@ -2056,9 +2273,9 @@
             // Στατιστικά από ιστορικό
             const totalTips = history.reduce((a,h) => {
                 const det = h.details.find(d=>d.name===s.name);
-                return a + (det ? parseFloat(det.outCash||0)+parseFloat(det.outCard||0) : 0);
+                return a + (det ? calcOut(h,det,'cash')+calcOut(h,det,'card') : 0);
             }, 0);
-            const workDays = history.filter(h => h.details.some(d=>d.name===s.name && parseFloat(d.outCash||0)+parseFloat(d.outCard||0)>0)).length;
+            const workDays = history.filter(h => h.details.some(d=>d.name===s.name && calcOut(h,d,'cash')+calcOut(h,d,'card')>0)).length;
 
             if (staffTab === 'active') {
                 sList.innerHTML += `
@@ -2174,8 +2391,8 @@
             weekDates.forEach(date => {
                 const day = filteredHistory.find(h => h.date === date);
                 const wd = day?.details.find(d => d.name === name);
-                const m = wd ? parseFloat(isPayout ? wd.outCash : wd.inCash) : 0;
-                const k = wd ? parseFloat(isPayout ? wd.outCard : wd.inCard) : 0;
+                const m = wd ? (isPayout ? calcOut(day, wd, 'cash') : parseFloat(wd.inCash)||0) : 0;
+                const k = wd ? (isPayout ? calcOut(day, wd, 'card') : parseFloat(wd.inCard)||0) : 0;
                 if(wd) dCount++; rM += m; rK += k;
                 if(showM) html += `<td style="background:#f0fdf4;color:#166534;padding:6px 3px;border:1px solid #e2e8f0;text-align:center;">${m>0?fmt(m):'-'}</td>`;
                 if(showK) html += `<td style="background:#eff6ff;color:#1e40af;padding:6px 3px;border:1px solid #e2e8f0;text-align:center;">${k>0?fmt(k):'-'}</td>`;
@@ -2204,8 +2421,8 @@
             const day = filteredHistory.find(h => h.date === date);
             let dM = 0, dK = 0;
             day?.details.forEach(d => {
-                dM += parseFloat(isPayout ? d.outCash : d.inCash);
-                dK += parseFloat(isPayout ? d.outCard : d.inCard);
+                dM += isPayout ? calcOut(day, d, 'cash') : (parseFloat(d.inCash)||0);
+                dK += isPayout ? calcOut(day, d, 'card') : (parseFloat(d.inCard)||0);
             });
             totM += dM; totK += dK;
             if(showM) html += `<td style="background:#1e293b;color:#6ee7b7;padding:7px 3px;border:1px solid #334155;text-align:center;font-weight:700;">${fmt(dM)}</td>`;
@@ -2778,17 +2995,17 @@
         const sunStr = sunday.toISOString().split('T')[0];
 
         const thisWeekData = history.filter(h => h.date >= monStr && h.date <= sunStr);
-        const weekTips = thisWeekData.reduce((a,h) => a + h.details.reduce((b,d) => b + parseFloat(d.outCash||0) + parseFloat(d.outCard||0), 0), 0);
+        const weekTips = thisWeekData.reduce((a,h) => a + h.details.reduce((b,d) => b + calcOut(h,d,'cash') + calcOut(h,d,'card'), 0), 0);
         const weekTurnover = thisWeekData.reduce((a,h) => a + (h.turnover||0), 0);
 
         // ── Τρέχων μήνας ──
         const ym = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`;
         const thisMonthData = history.filter(h => h.date.startsWith(ym));
-        const monthTips = thisMonthData.reduce((a,h) => a + h.details.reduce((b,d) => b + parseFloat(d.outCash||0) + parseFloat(d.outCard||0), 0), 0);
+        const monthTips = thisMonthData.reduce((a,h) => a + h.details.reduce((b,d) => b + calcOut(h,d,'cash') + calcOut(h,d,'card'), 0), 0);
         const monthTurnover = thisMonthData.reduce((a,h) => a + (h.turnover||0), 0);
 
         // ── Συνολικό % ──
-        const allTips = history.reduce((a,h) => a + h.details.reduce((b,d) => b + parseFloat(d.outCash||0) + parseFloat(d.outCard||0), 0), 0);
+        const allTips = history.reduce((a,h) => a + h.details.reduce((b,d) => b + calcOut(h,d,'cash') + calcOut(h,d,'card'), 0), 0);
         const allTurnover = history.reduce((a,h) => a + (h.turnover||0), 0);
         const actualPct = allTurnover > 0 ? (allTips/allTurnover*100) : 0;
 
@@ -3027,7 +3244,7 @@
         data.forEach(h => {
             let dC=0, dK=0;
             h.details.forEach(d => {
-                const c=parseFloat(d.outCash)||0, k=parseFloat(d.outCard)||0;
+                const c=calcOut(h,d,'cash'), k=calcOut(h,d,'card');
                 dC+=c; dK+=k;
                 if (!staffMap[d.name]) staffMap[d.name]={total:0,days:0};
                 staffMap[d.name].total+=c+k;
@@ -3276,7 +3493,7 @@
         data.forEach(h => {
             let dCash=0, dCard=0;
             h.details.forEach(d => {
-                const c = parseFloat(d.outCash)||0, k = parseFloat(d.outCard)||0;
+                const c = calcOut(h,d,'cash'), k = calcOut(h,d,'card');
                 dCash+=c; dCard+=k;
                 if (!staffMap[d.name]) staffMap[d.name]={cash:0,card:0,days:0};
                 staffMap[d.name].cash+=c; staffMap[d.name].card+=k;
@@ -3543,9 +3760,9 @@
             return;
         }
         history.sort((a,b) => new Date(b.date) - new Date(a.date)).forEach(h => {
-            const dayTips = h.details.reduce((a,d)=>a+parseFloat(d.outCash||0)+parseFloat(d.outCard||0),0);
-            const cash    = h.details.reduce((a,d)=>a+parseFloat(d.outCash||0),0);
-            const card    = h.details.reduce((a,d)=>a+parseFloat(d.outCard||0),0);
+                const dayTips = h.details.reduce((a,d)=>a+calcOut(h,d,'cash')+calcOut(h,d,'card'),0);
+                const cash    = h.details.reduce((a,d)=>a+calcOut(h,d,'cash'),0);
+                const card    = h.details.reduce((a,d)=>a+calcOut(h,d,'card'),0);
             const [y,m,d] = h.date.split('-');
             const dow = new Date(h.date).getDay();
             const dayNames = ['Κυρ','Δευ','Τρι','Τετ','Πεμ','Παρ','Σαβ'];
@@ -3563,7 +3780,7 @@
                             &nbsp;·&nbsp; <span style="color:#1e40af;">💳 ${fmt(card)}€</span>
                         </div>
                         <div style="font-size:0.75rem;color:var(--text-muted);margin-top:2px;">
-                            ${h.details.map(d=>`${d.name}: ${fmt(parseFloat(d.outCash||0)+parseFloat(d.outCard||0))}€`).join(' · ')}
+                            ${h.details.map(d=>`${d.name}: ${fmt(calcOut(h,d,'cash')+calcOut(h,d,'card'))}€`).join(' · ')}
                         </div>
                     </div>
                 </div>
@@ -3579,7 +3796,7 @@
     function calToday()     { calYear=new Date().getFullYear(); calMonth=new Date().getMonth(); renderCalendar(); }
 
     function getDayTips(h) {
-        return h.details.reduce((a,d)=>a+parseFloat(d.outCash||0)+parseFloat(d.outCard||0),0);
+        return h.details.reduce((a,d)=>a+calcOut(h,d,'cash')+calcOut(h,d,'card'),0);
     }
 
     function renderCalendar() {
@@ -3615,8 +3832,8 @@
             return parseInt(y)===calYear && parseInt(m)-1===calMonth;
         });
         const monthTips     = monthEntries.reduce((a,h)=>a+getDayTips(h),0);
-        const monthCash     = monthEntries.reduce((a,h)=>a+h.details.reduce((b,d)=>b+parseFloat(d.outCash||0),0),0);
-        const monthCard     = monthEntries.reduce((a,h)=>a+h.details.reduce((b,d)=>b+parseFloat(d.outCard||0),0),0);
+        const monthCash     = monthEntries.reduce((a,h)=>a+h.details.reduce((b,d)=>b+calcOut(h,d,'cash'),0),0);
+        const monthCard     = monthEntries.reduce((a,h)=>a+h.details.reduce((b,d)=>b+calcOut(h,d,'card'),0),0);
         const monthTurnover = monthEntries.reduce((a,h)=>a+(h.turnover||0),0);
         const monthPct      = monthTurnover>0 ? (monthTips/monthTurnover*100).toFixed(2) : '—';
 
@@ -3655,8 +3872,8 @@
                 else if (ratio >= 0.85) { cellBg='#fefce8'; cellBorder='#fde047'; badgeBg='#f59e0b'; }
                 else                    { cellBg='#fff1f2'; cellBorder='#fca5a5'; badgeBg='#ef4444'; }
 
-                const cash = entry.details.reduce((a,d)=>a+parseFloat(d.outCash||0),0);
-                const card = entry.details.reduce((a,d)=>a+parseFloat(d.outCard||0),0);
+                const cash = entry.details.reduce((a,d)=>a+calcOut(entry,d,'cash'),0);
+                const card = entry.details.reduce((a,d)=>a+calcOut(entry,d,'card'),0);
                 tipsHtml = `
                     <div style="font-size:0.8rem;font-weight:800;color:#1e293b;margin:4px 0 2px;">${fmt(tips)}€</div>
                     <div style="display:flex;gap:3px;flex-wrap:wrap;">
@@ -3709,10 +3926,13 @@
 
         document.getElementById('modalDate').textContent = `${dayNames[dow]}, ${d}/${m}/${y}`;
 
-        const totalTips = h.details.reduce((a,d)=>a+parseFloat(d.outCash||0)+parseFloat(d.outCard||0),0);
+        const totalTips = h.details.reduce((a,d)=>a+calcOut(h,d,'cash')+calcOut(h,d,'card'),0);
         const totalCash = h.details.reduce((a,d)=>a+parseFloat(d.outCash||0),0);
         const totalCard = h.details.reduce((a,d)=>a+parseFloat(d.outCard||0),0);
         const pct = h.turnover>0?(totalTips/h.turnover*100).toFixed(2):'—';
+
+        const modeLabels = {'points':'📊 Points','hours':'⏱️ Ώρες','points_hours':'⚖️ Points×Ώρες'};
+        const modeLabel = modeLabels[h.distMode] || '📊 Points';
 
         let html = `
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:1rem;">
@@ -3733,16 +3953,21 @@
                 <div style="font-size:1.1rem;font-weight:800;color:#b45309;">${fmt(h.turnover)}€ · ${pct}%</div>
             </div>
         </div>
+        <div style="background:#f8fafc;border-radius:6px;padding:6px 10px;margin-bottom:10px;font-size:0.78rem;color:#64748b;">
+            Τρόπος κατανομής: <b style="color:#4f46e5;">${modeLabel}</b>
+        </div>
         <div style="font-size:0.82rem;font-weight:700;color:var(--text-muted);margin-bottom:6px;text-transform:uppercase;">Ανά Άτομο</div>
         <div style="border:1px solid var(--border);border-radius:8px;overflow:hidden;">`;
 
         h.details.forEach((d,i) => {
             const cash = parseFloat(d.outCash||0), card = parseFloat(d.outCard||0);
+            const hrs = d.hours > 0 ? `<span style="color:#b45309;background:#fffbeb;padding:2px 8px;border-radius:5px;">⏱️ ${d.hours}h</span>` : '';
             html += `<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 12px;${i>0?'border-top:1px solid #f1f5f9;':''}background:${i%2===0?'white':'#fafafa'};">
                 <span style="font-weight:700;">${d.name}</span>
-                <div style="display:flex;gap:8px;font-size:0.82rem;">
-                    <span style="color:#166534;background:#f0fdf4;padding:2px 8px;border-radius:5px;">M ${fmt(cash)}€</span>
-                    <span style="color:#1e40af;background:#eff6ff;padding:2px 8px;border-radius:5px;">K ${fmt(card)}€</span>
+                <div style="display:flex;gap:6px;font-size:0.82rem;flex-wrap:wrap;justify-content:flex-end;">
+                    ${hrs}
+                    <span style="color:#166534;background:#f0fdf4;padding:2px 8px;border-radius:5px;">💵 ${fmt(cash)}€</span>
+                    <span style="color:#1e40af;background:#eff6ff;padding:2px 8px;border-radius:5px;">💳 ${fmt(card)}€</span>
                     <span style="font-weight:800;color:#1e293b;">${fmt(cash+card)}€</span>
                 </div>
             </div>`;
